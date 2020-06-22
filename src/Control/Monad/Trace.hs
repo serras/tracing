@@ -29,7 +29,9 @@ import Control.Monad.Trace.Class
 import Control.Monad.Trace.Internal
 
 import Control.Applicative ((<|>))
-import Control.Monad.Base (MonadBase)
+import Control.Concurrent.STM.Lifted (TChan, TVar, atomically, modifyTVar', newTChanIO, newTVarIO, readTVar, writeTChan, writeTVar)
+import Control.Exception.Lifted (finally)
+import Control.Monad.Base (MonadBase, liftBase)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT(ReaderT), ask, asks, local, runReaderT)
 import Control.Monad.Reader.Class (MonadReader)
@@ -46,9 +48,6 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Time.Clock (NominalDiffTime)
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
-import UnliftIO (MonadUnliftIO, withRunInIO)
-import UnliftIO.Exception (finally)
-import UnliftIO.STM (TChan, TVar, atomically, modifyTVar', newTChanIO, newTVarIO, readTVar, writeTChan, writeTVar)
 
 -- | A collection of span tags.
 type Tags = Map Key JSON.Value
@@ -115,15 +114,15 @@ instance MonadReader r m => MonadReader r (TraceT m) where
   ask = lift ask
   local f (TraceT (ReaderT g)) = TraceT $ ReaderT $ \r -> local f $ g r
 
-instance MonadUnliftIO m => MonadTrace (TraceT m) where
+instance (MonadIO m, MonadBaseControl IO m) => MonadTrace (TraceT m) where
   trace bldr (TraceT reader) = TraceT $ do
     parentScope <- ask
     let
       mbParentSpn = scopeSpan parentScope
       mbParentCtx = spanContext <$> mbParentSpn
       mbTraceID = contextTraceID <$> mbParentCtx
-    spanID <- maybe (liftIO randomSpanID) pure $ builderSpanID bldr
-    traceID <- maybe (liftIO randomTraceID) pure $ builderTraceID bldr <|> mbTraceID
+    spanID <- maybe (liftBase randomSpanID) pure $ builderSpanID bldr
+    traceID <- maybe (liftBase randomTraceID) pure $ builderTraceID bldr <|> mbTraceID
     sampling <- case builderSamplingPolicy bldr of
       Just policy -> liftIO policy
       Nothing -> pure $ fromMaybe Never (spanSamplingDecision <$> mbParentSpn)
@@ -166,9 +165,6 @@ instance MonadUnliftIO m => MonadTrace (TraceT m) where
     for_ mbTV $ \tv -> do
       time <- maybe (liftIO getPOSIXTime) pure mbTime
       atomically $ modifyTVar' tv ((time, key, val) :)
-
-instance MonadUnliftIO m => MonadUnliftIO (TraceT m) where
-  withRunInIO inner = TraceT $ withRunInIO $ \run -> inner (run . traceTReader)
 
 -- | Trace an action, sampling its generated spans. This method is thread-safe and can be used to
 -- trace multiple actions concurrently.
